@@ -25,6 +25,7 @@
  * satisfy the overall load at any given moment.
  */
 
+
 struct cass_cpu_cand {
 	int cpu;
 	unsigned int exit_lat;
@@ -53,7 +54,7 @@ unsigned long cass_cpu_util(int cpu, bool sync)
 static __always_inline
 bool cass_cpu_better(const struct cass_cpu_cand *a,
 		     const struct cass_cpu_cand *b,
-		     int prev_cpu, bool sync)
+		     int this_cpu, int prev_cpu, bool sync)
 {
 #define cass_cmp(a, b) ({ res = (a) - (b); })
 #define cass_eq(a, b) ({ res = (a) == (b); })
@@ -64,8 +65,7 @@ bool cass_cpu_better(const struct cass_cpu_cand *a,
 		goto done;
 
 	/* Prefer the current CPU for sync wakes */
-	if (sync && (cass_eq(a->cpu, smp_processor_id()) ||
-		     !cass_cmp(b->cpu, smp_processor_id())))
+	if (sync && (cass_eq(a->cpu, this_cpu) || !cass_cmp(b->cpu, this_cpu)))
 		goto done;
 
 	/* Prefer the CPU with higher capacity */
@@ -95,6 +95,7 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 {
 	/* Initialize @best such that @best always has a valid CPU at the end */
 	struct cass_cpu_cand cands[2], *best = cands;
+	int this_cpu = raw_smp_processor_id();
 	bool has_idle = false;
 	unsigned long p_util;
 	int cidx = 0, cpu;
@@ -174,7 +175,7 @@ static int cass_best_cpu(struct task_struct *p, int prev_cpu, bool sync)
 		 */
 		curr->cpu = cpu;
 		if (best == curr ||
-		    cass_cpu_better(curr, best, prev_cpu, sync)) {
+		    cass_cpu_better(curr, best, this_cpu, prev_cpu, sync)) {
 			best = curr;
 			cidx ^= 1;
 		}
