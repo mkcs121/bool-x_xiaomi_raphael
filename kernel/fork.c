@@ -95,8 +95,9 @@
 #include <linux/cpufreq_times.h>
 #include <linux/scs.h>
 #include <linux/simple_lmk.h>
+
+#include <linux/cpu_input_boost.h>
 #include <linux/devfreq_boost.h>
-#include <linux/irq.h>
 #include <linux/event_tracking.h>
 
 #include <asm/pgtable.h>
@@ -497,7 +498,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 				atomic_dec(&inode->i_writecount);
 			i_mmap_lock_write(mapping);
 			if (tmp->vm_flags & VM_SHARED)
-				atomic_inc(&mapping->i_mmap_writable);
+				mapping_allow_writable(mapping);
 			flush_dcache_mmap_lock(mapping);
 			/* insert tmp into the share list, just after mpnt */
 			vma_interval_tree_insert_after(tmp, mpnt,
@@ -1011,7 +1012,7 @@ void mmput_async(struct mm_struct *mm)
 {
 	if (atomic_dec_and_test(&mm->mm_users)) {
 		INIT_WORK(&mm->async_put_work, mmput_async_fn);
-		schedule_work(&mm->async_put_work);
+		queue_work(system_highpri_wq, &mm->async_put_work);
 	}
 }
 #endif
@@ -1922,8 +1923,6 @@ static __latent_entropy struct task_struct *copy_process(
 	p->sequential_io_avg	= 0;
 #endif
 
-	p->fpack = NULL;
-
 	/* Perform scheduler related setup. Assign this task to a CPU. */
 	retval = sched_fork(clone_flags, p);
 	if (retval)
@@ -2148,9 +2147,9 @@ static __latent_entropy struct task_struct *copy_process(
 	write_unlock_irq(&tasklist_lock);
 
 	proc_fork_connector(p);
+	sched_post_fork(p);
 	cgroup_post_fork(p);
 	cgroup_threadgroup_change_end(current);
-	sched_post_fork(p);
 	perf_event_fork(p);
 
 	trace_task_newtask(p, clone_flags);
@@ -2259,9 +2258,10 @@ long _do_fork(unsigned long clone_flags,
 	int trace = 0;
 	long nr;
 
-	/* Boost CPU to the max for 50 ms when userspace launches an app */
+	/* Boost CPU to the max for 500 ms when userspace launches an app */
 	if (task_is_zygote(current)) {
 		if (time_before(jiffies, last_mb_time + msecs_to_jiffies(200))) {
+			cpu_input_boost_kick_max(500, false);
 			devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 500, true);
 			devfreq_boost_kick_max(DEVFREQ_MSM_LLCCBW, 500, true);
 		}
@@ -2296,6 +2296,8 @@ long _do_fork(unsigned long clone_flags,
 		struct completion vfork;
 		struct pid *pid;
 
+		cpufreq_task_times_alloc(p);
+
 		trace_sched_process_fork(current, p);
 
 		pid = get_task_pid(p, PIDTYPE_PID);
@@ -2308,6 +2310,12 @@ long _do_fork(unsigned long clone_flags,
 			p->vfork_done = &vfork;
 			init_completion(&vfork);
 			get_task_struct(p);
+		}
+
+		if (IS_ENABLED(CONFIG_LRU_GEN) && !(clone_flags & CLONE_VM)) {
+			/* lock the task to synchronize with memcg migration */
+			task_lock(p);
+			task_unlock(p);
 		}
 
 		wake_up_new_task(p);
